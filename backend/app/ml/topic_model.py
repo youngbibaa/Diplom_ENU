@@ -1,66 +1,136 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from sklearn.decomposition import LatentDirichletAllocation
-from sklearn.feature_extraction.text import CountVectorizer
-
-from app.preprocessing.cleaner import RU_STOPWORDS, RussianTextPreprocessor
+from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 
 
-@dataclass
-class TopicDefinition:
-    name: str
-    keywords: str
+CUSTOM_NEWS_STOPWORDS = {
+    "said", "says", "say", "latest", "despite", "investigation", "ties",
+    "region", "official", "officials", "people", "person", "country", "countries",
+    "state", "states", "president", "minister", "ministers", "government",
+    "week", "weeks", "month", "months", "year", "years", "day", "days",
+    "today", "yesterday", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "new", "must", "may", "might",
+    "one", "two", "three", "our", "their", "his", "her", "she", "they",
+    "mr", "mrs", "ms", "according", "reported", "report",
+    "news", "times", "york", "middle", "east"
+}
+
+DEFAULT_STOPWORDS = ENGLISH_STOP_WORDS.union(CUSTOM_NEWS_STOPWORDS)
+
+WEAK_TOPIC_WORDS = DEFAULT_STOPWORDS.union({
+    "attack", "attacks", "war", "conflict", "crisis", "situation"
+})
 
 
-@dataclass
-class TopicAssignment:
-    topic_index: int
-    probability: float
+def _is_good_topic_name_token(token: str) -> bool:
+    token = token.strip().lower()
+    if not token:
+        return False
+    if token in WEAK_TOPIC_WORDS and token not in {"iran", "israel", "china", "oil"}:
+        return False
+    if len(token) < 4 and token not in {"iran", "iraq", "oil"}:
+        return False
+    return True
 
 
-class LDATopicModeler:
-    def __init__(self, topic_count: int = 5, top_words_per_topic: int = 7):
-        self.topic_count = topic_count
-        self.top_words_per_topic = top_words_per_topic
-        self.preprocessor = RussianTextPreprocessor(keep_stopwords=False)
+def _build_topic_name(keywords: list[str], topic_index: int) -> str:
+    selected = []
 
-    def build_topics(self, texts: list[str]) -> tuple[list[TopicDefinition], list[TopicAssignment]]:
-        filtered_texts = [text for text in texts if text and text.strip()]
-        if len(filtered_texts) < 2:
-            return [], []
+    for keyword in keywords:
+        keyword = keyword.strip().lower()
+        if not keyword:
+            continue
 
-        topic_count = min(self.topic_count, len(filtered_texts))
-        vectorizer = CountVectorizer(
-            max_df=0.9,
-            min_df=1,
-            stop_words=list(RU_STOPWORDS),
-            token_pattern=r"(?u)\b\w\w+\b",
+        parts = [part for part in keyword.split() if _is_good_topic_name_token(part)]
+        if not parts:
+            continue
+
+        candidate = " ".join(parts[:2]).strip()
+        if candidate and candidate not in selected:
+            selected.append(candidate)
+
+        if len(selected) >= 3:
+            break
+
+    if not selected:
+        fallback = [kw for kw in keywords if kw.strip()]
+        if fallback:
+            return " / ".join(fallback[:3])
+        return f"Topic {topic_index}"
+
+    return " / ".join(selected[:3])
+
+
+def build_topics(texts: list[str], n_topics: int = 5, n_top_words: int = 7):
+    filtered_texts = [text for text in texts if text and text.strip()]
+    if len(filtered_texts) < 3:
+        return [], []
+
+    min_df = 2 if len(filtered_texts) >= 10 else 1
+
+    vectorizer = CountVectorizer(
+        stop_words=list(DEFAULT_STOPWORDS),
+        max_df=0.85,
+        min_df=min_df,
+        ngram_range=(1, 2),
+        token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z\-]{2,}\b",
+    )
+
+    dtm = vectorizer.fit_transform(filtered_texts)
+
+    if dtm.shape[1] == 0:
+        return [], []
+
+    n_topics = min(n_topics, max(1, min(dtm.shape[0], dtm.shape[1])))
+
+    lda = LatentDirichletAllocation(
+        n_components=n_topics,
+        random_state=42,
+        learning_method="batch",
+        max_iter=30,
+    )
+    lda.fit(dtm)
+
+    feature_names = vectorizer.get_feature_names_out()
+    topics = []
+
+    for topic_idx, topic_weights in enumerate(lda.components_, start=1):
+        sorted_indices = topic_weights.argsort()[::-1]
+
+        keywords = []
+        seen = set()
+
+        for term_idx in sorted_indices:
+            term = feature_names[term_idx].strip().lower()
+            if not term:
+                continue
+            if term in seen:
+                continue
+            if all(part in DEFAULT_STOPWORDS for part in term.split()):
+                continue
+
+            keywords.append(term)
+            seen.add(term)
+
+            if len(keywords) >= n_top_words:
+                break
+
+        topic_name = _build_topic_name(keywords, topic_idx)
+
+        topics.append(
+            {
+                "name": topic_name,
+                "keywords": ", ".join(keywords),
+            }
         )
-        document_term_matrix = vectorizer.fit_transform(filtered_texts)
-        if document_term_matrix.shape[1] == 0:
-            return [], []
 
-        lda = LatentDirichletAllocation(
-            n_components=topic_count,
-            random_state=42,
-            learning_method="batch",
-            max_iter=30,
-        )
-        lda.fit(document_term_matrix)
+    doc_topic_matrix = lda.transform(dtm)
+    assignments = []
 
-        feature_names = vectorizer.get_feature_names_out()
-        topics: list[TopicDefinition] = []
-        for idx, topic in enumerate(lda.components_):
-            top_indices = topic.argsort()[-self.top_words_per_topic:][::-1]
-            keywords = [feature_names[i] for i in top_indices]
-            topics.append(TopicDefinition(name=f"Topic {idx + 1}", keywords=", ".join(keywords)))
+    for row in doc_topic_matrix:
+        topic_index = int(row.argmax())
+        probability = float(row[topic_index])
+        assignments.append((topic_index, probability))
 
-        topic_matrix = lda.transform(document_term_matrix)
-        assignments: list[TopicAssignment] = []
-        for row in topic_matrix:
-            topic_index = int(row.argmax())
-            assignments.append(TopicAssignment(topic_index=topic_index, probability=float(row[topic_index])))
-
-        return topics, assignments
+    return topics, assignments

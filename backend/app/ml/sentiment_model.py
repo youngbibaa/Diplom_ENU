@@ -1,111 +1,157 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
+from functools import lru_cache
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-
-from app.preprocessing.cleaner import RussianTextPreprocessor
+from sklearn.pipeline import FeatureUnion, Pipeline
 
 
-@dataclass
-class SentimentPrediction:
-    label: str
-    score: float
+TRAIN_TEXTS = [
+    # positive EN
+    "markets recover after positive economic agreement",
+    "peace talks show progress and tensions are easing",
+    "the company reported strong growth and better results",
+    "new support package improves the situation significantly",
+    "scientists announced a breakthrough and optimistic outlook",
+    "the reform was welcomed by investors and citizens",
+    "cooperation between countries improved regional stability",
+    "the new policy brings development and opportunity",
+    "production increased and the outlook is positive",
+    "the agreement was successful and reduced risks",
+    # neutral EN
+    "officials said the meeting is scheduled for thursday",
+    "the report describes the current political situation",
+    "the government published a new statement today",
+    "the article explains how the new law works",
+    "the president met with ministers in the capital",
+    "the company released its quarterly report",
+    "analysts discussed the possible scenarios for next year",
+    "the news covers events in the middle east",
+    "the committee presented a formal recommendation",
+    "the document contains updated operational data",
+    # negative EN
+    "war escalates and civilians are killed in attacks",
+    "oil prices surge amid crisis and growing fear",
+    "the economy weakens as conflict spreads",
+    "the company reported losses and declining demand",
+    "missile strikes caused damage and panic",
+    "investors fear recession and further instability",
+    "the attack increased risks across the region",
+    "the situation worsened after another deadly strike",
+    "the market fell sharply because of uncertainty",
+    "the crisis deepened and confidence collapsed",
 
-
-SEED_SAMPLES: list[tuple[str, str]] = [
-    ("positive", "экономика показывает устойчивый рост и развитие рынка"),
-    ("positive", "компания сообщила об улучшении показателей и высоком спросе"),
-    ("positive", "граждане поддержали инициативу и отметили успех проекта"),
-    ("positive", "инвестиции выросли а производство продемонстрировало прогресс"),
-    ("positive", "пользователи положительно оценили сервис и качество работы"),
-    ("positive", "правительство объявило о запуске новых мер поддержки бизнеса"),
-    ("positive", "рынок труда стабилизировался и доходы населения увеличились"),
-    ("positive", "исследование показало улучшение экологической ситуации в регионе"),
-    ("positive", "команда добилась победы и получила высокую оценку экспертов"),
-    ("positive", "в отрасли наблюдается рост экспорта и расширение производства"),
-    ("neutral", "ведомство опубликовало отчет о состоянии рынка за квартал"),
-    ("neutral", "сегодня в городе состоялось заседание комиссии по транспорту"),
-    ("neutral", "новый документ описывает порядок работы информационной системы"),
-    ("neutral", "участники форума обсудили вопросы образования и цифровизации"),
-    ("neutral", "в публикации приведены статистические данные за прошлый месяц"),
-    ("neutral", "на сайте размещена информация о расписании и маршрутах"),
-    ("neutral", "аналитики представили обзор текущей ситуации без резких оценок"),
-    ("neutral", "министерство рассмотрело несколько сценариев дальнейшего развития"),
-    ("neutral", "компания обновила регламент и представила план мероприятий"),
-    ("neutral", "в отчете перечислены показатели производства и поставок"),
-    ("negative", "на рынке усилился кризис и выросли риски для инвесторов"),
-    ("negative", "предприятие столкнулось со спадом спроса и убытками"),
-    ("negative", "жители жалуются на проблемы и ухудшение качества услуг"),
-    ("negative", "в регионе произошел конфликт который вызвал негативную реакцию"),
-    ("negative", "аналитики предупредили об инфляции и снижении доходов"),
-    ("negative", "компания сообщила об аварии задержках и финансовых потерях"),
-    ("negative", "эксперты отмечают дефицит ресурсов и рост социальной напряженности"),
-    ("negative", "скандал вокруг проекта привел к падению доверия пользователей"),
-    ("negative", "на фоне санкций усилилось давление на отрасль и экспорт сократился"),
-    ("negative", "в отчете говорится о сокращении производства и росте безработицы"),
+    # positive RU
+    "рынок восстановился после позитивных новостей",
+    "переговоры завершились успешно и напряженность снизилась",
+    "компания показала сильный рост и хорошие результаты",
+    "новая программа поддержки улучшила ситуацию",
+    "ученые сообщили о прорыве и хорошем прогнозе",
+    "реформа была встречена положительно инвесторами",
+    "сотрудничество стран укрепило стабильность в регионе",
+    "новая политика создает возможности для развития",
+    "производство выросло и прогноз остается положительным",
+    "соглашение оказалось успешным и снизило риски",
+    # neutral RU
+    "официальные лица сообщили о встрече в четверг",
+    "в отчете описывается текущая политическая ситуация",
+    "правительство опубликовало новое заявление",
+    "статья объясняет как работает новый закон",
+    "президент встретился с министрами в столице",
+    "компания выпустила квартальный отчет",
+    "аналитики обсудили возможные сценарии на следующий год",
+    "новость посвящена событиям на ближнем востоке",
+    "комитет представил формальную рекомендацию",
+    "документ содержит обновленные данные",
+    # negative RU
+    "война усиливается и мирные жители погибают",
+    "цены на нефть растут на фоне кризиса и страха",
+    "экономика слабеет из за конфликта",
+    "компания сообщила об убытках и падении спроса",
+    "ракетные удары вызвали разрушения и панику",
+    "инвесторы опасаются рецессии и нестабильности",
+    "атака усилила риски в регионе",
+    "ситуация ухудшилась после нового удара",
+    "рынок резко упал из за неопределенности",
+    "кризис углубился и доверие снизилось",
 ]
 
+TRAIN_LABELS = (
+    ["positive"] * 10
+    + ["neutral"] * 10
+    + ["negative"] * 10
+    + ["positive"] * 10
+    + ["neutral"] * 10
+    + ["negative"] * 10
+)
 
-class TfidfLogRegSentimentAnalyzer:
-    def __init__(self):
-        self.preprocessor = RussianTextPreprocessor(keep_stopwords=False)
-        self.pipeline = Pipeline(
-            steps=[
-                (
-                    "tfidf",
-                    TfidfVectorizer(
-                        ngram_range=(1, 2),
-                        min_df=1,
-                        max_features=12000,
-                        sublinear_tf=True,
-                    ),
+
+@lru_cache
+def get_sentiment_pipeline() -> Pipeline:
+    features = FeatureUnion(
+        [
+            (
+                "word_tfidf",
+                TfidfVectorizer(
+                    lowercase=True,
+                    sublinear_tf=True,
+                    ngram_range=(1, 2),
+                    min_df=1,
                 ),
-                (
-                    "clf",
-                    LogisticRegression(
-                        max_iter=2000,
-                        C=4.0,
-                        class_weight="balanced",
-                        solver="lbfgs",
-                    ),
+            ),
+            (
+                "char_tfidf",
+                TfidfVectorizer(
+                    lowercase=True,
+                    sublinear_tf=True,
+                    analyzer="char_wb",
+                    ngram_range=(3, 5),
+                    min_df=1,
                 ),
-            ]
-        )
-        self.is_fitted = False
-        self.train_from_seed()
+            ),
+        ]
+    )
 
-    def _normalize_for_model(self, text: str) -> str:
-        return self.preprocessor.preprocess_text(text)
+    pipeline = Pipeline(
+        [
+            ("features", features),
+            (
+                "classifier",
+                LogisticRegression(
+                    max_iter=2000,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
 
-    def train_from_seed(self) -> None:
-        texts = [self._normalize_for_model(text) for _, text in SEED_SAMPLES]
-        labels = [label for label, _ in SEED_SAMPLES]
-        self.pipeline.fit(texts, labels)
-        self.is_fitted = True
+    pipeline.fit(TRAIN_TEXTS, TRAIN_LABELS)
+    return pipeline
 
-    def fit(self, texts: list[str], labels: list[str]) -> None:
-        processed = [self._normalize_for_model(text) for text in texts]
-        pairs = [(t, y) for t, y in zip(processed, labels) if t.strip()]
-        if len(pairs) < 9 or len(set(labels)) < 3:
-            return
-        x_train = [t for t, _ in pairs]
-        y_train = [y for _, y in pairs]
-        self.pipeline.fit(x_train, y_train)
-        self.is_fitted = True
 
-    def predict(self, text: str) -> SentimentPrediction:
-        if not self.is_fitted:
-            self.train_from_seed()
-        processed = self._normalize_for_model(text)
-        if not processed:
-            return SentimentPrediction(label="neutral", score=0.0)
+def predict_sentiment(text: str) -> tuple[str, float]:
+    text = (text or "").strip()
+    if not text:
+        return "neutral", 0.0
 
-        label = str(self.pipeline.predict([processed])[0])
-        probabilities = self.pipeline.predict_proba([processed])[0]
-        classes = list(self.pipeline.named_steps["clf"].classes_)
-        label_index = classes.index(label)
-        score = float(probabilities[label_index])
-        return SentimentPrediction(label=label, score=score)
+    pipeline = get_sentiment_pipeline()
+
+    probabilities = pipeline.predict_proba([text])[0]
+    classes = pipeline.named_steps["classifier"].classes_
+
+    proba_by_label = {
+        label: float(prob)
+        for label, prob in zip(classes, probabilities)
+    }
+
+    positive_proba = proba_by_label.get("positive", 0.0)
+    negative_proba = proba_by_label.get("negative", 0.0)
+    neutral_proba = proba_by_label.get("neutral", 0.0)
+
+    label = max(proba_by_label, key=proba_by_label.get)
+    signed_score = round(positive_proba - negative_proba, 4)
+
+    if abs(signed_score) < 0.10 and neutral_proba >= max(positive_proba, negative_proba):
+        label = "neutral"
+
+    return label, signed_score

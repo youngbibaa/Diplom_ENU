@@ -1,88 +1,113 @@
-from __future__ import annotations
-
 import hashlib
 import re
 from functools import lru_cache
 
 import pymorphy3
 
-URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-HTML_TAG_RE = re.compile(r"<[^>]+>")
-NON_WORD_RE = re.compile(r"[^a-zA-Zа-яА-ЯёЁ0-9\s-]")
-DASH_RE = re.compile(r"[\u2012-\u2015]")
-MULTISPACE_RE = re.compile(r"\s+")
-TOKEN_RE = re.compile(r"[a-zA-Zа-яА-ЯёЁ-]{2,}")
+
+EN_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for",
+    "from", "had", "has", "have", "he", "her", "his", "in", "is", "it", "its",
+    "of", "on", "or", "that", "the", "their", "there", "they", "this", "to",
+    "was", "were", "will", "with", "would", "could", "should", "into", "than",
+    "then", "them", "who", "whom", "what", "when", "where", "why", "how",
+    "about", "after", "before", "during", "over", "under", "again", "further",
+    "once", "here", "all", "any", "both", "each", "few", "more", "most", "other",
+    "some", "such", "no", "nor", "not", "only", "own", "same", "so", "too",
+    "very", "can", "just", "don", "now",
+    # news/domain stopwords
+    "said", "says", "say", "latest", "despite", "investigation", "ties",
+    "region", "official", "officials", "people", "person", "country", "countries",
+    "state", "states", "president", "minister", "ministers", "government",
+    "week", "weeks", "month", "months", "year", "years", "day", "days",
+    "today", "yesterday", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "new", "must", "may", "might",
+    "one", "two", "three", "our", "their", "his", "her", "she", "they",
+    "mr", "mrs", "ms", "latest", "according", "reported", "report",
+    "news", "times", "york",
+}
 
 RU_STOPWORDS = {
-    "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так",
-    "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было",
-    "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг",
-    "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж",
-    "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо",
-    "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "чего", "раз",
-    "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой",
-    "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были",
-    "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после",
-    "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве",
-    "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том",
-    "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "это", "этот", "эта", "эти",
-    "the", "and", "for", "that", "with", "from", "this", "have", "has", "are", "was", "were", "will",
-    "into", "about", "after", "before", "than", "them", "they", "their", "said", "says", "would", "could",
+    "и", "в", "во", "на", "но", "а", "о", "об", "от", "до", "по", "из", "у",
+    "за", "с", "со", "к", "ко", "для", "при", "над", "под", "без", "не", "ни",
+    "что", "как", "так", "это", "этот", "эта", "эти", "то", "те", "же", "ли",
+    "или", "бы", "был", "была", "были", "быть", "есть", "нет", "его", "ее",
+    "их", "мы", "вы", "они", "он", "она", "оно", "я", "ты", "меня", "мне",
+    "тебя", "вам", "нас", "них", "который", "которая", "которые", "которое",
+    "такой", "такая", "такие", "уже", "еще", "только", "если", "чтобы", "после",
+    "перед", "между", "через"
 }
 
 
-@lru_cache(maxsize=1)
-def _get_morph() -> pymorphy3.MorphAnalyzer:
+@lru_cache
+def get_morph():
     return pymorphy3.MorphAnalyzer()
 
 
-class RussianTextPreprocessor:
-    def __init__(self, keep_stopwords: bool = False):
-        self.keep_stopwords = keep_stopwords
-        self.morph = _get_morph()
+def detect_language(text: str) -> str:
+    ru_count = len(re.findall(r"[а-яА-ЯёЁ]", text))
+    en_count = len(re.findall(r"[a-zA-Z]", text))
+    return "ru" if ru_count >= en_count else "en"
 
-    def normalize_raw(self, text: str) -> str:
-        text = (text or "").lower().replace("ё", "е")
-        text = DASH_RE.sub("-", text)
-        text = URL_RE.sub(" ", text)
-        text = HTML_TAG_RE.sub(" ", text)
-        text = NON_WORD_RE.sub(" ", text)
-        text = MULTISPACE_RE.sub(" ", text).strip()
-        return text
 
-    def tokenize(self, text: str) -> list[str]:
-        normalized = self.normalize_raw(text)
-        return TOKEN_RE.findall(normalized)
+def normalize_text(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"http\S+", " ", text)
+    text = re.sub(r"www\.\S+", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9\s\-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-    def lemmatize_token(self, token: str) -> str:
-        if token.isascii():
-            return token
-        try:
-            return self.morph.parse(token)[0].normal_form
-        except Exception:
-            return token
 
-    def preprocess_tokens(self, text: str) -> list[str]:
-        result: list[str] = []
-        for token in self.tokenize(text):
-            lemma = self.lemmatize_token(token)
-            if len(lemma) < 2:
-                continue
-            if not self.keep_stopwords and lemma in RU_STOPWORDS:
-                continue
-            result.append(lemma)
-        return result
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Zа-яА-ЯёЁ\-]{3,}", text.lower())
 
-    def preprocess_text(self, text: str) -> str:
-        return " ".join(self.preprocess_tokens(text))
+
+def lemmatize_ru(tokens: list[str]) -> list[str]:
+    morph = get_morph()
+    lemmas = []
+    for token in tokens:
+        parsed = morph.parse(token)
+        lemmas.append(parsed[0].normal_form if parsed else token)
+    return lemmas
+
+
+def remove_stopwords(tokens: list[str], lang: str) -> list[str]:
+    stopwords = RU_STOPWORDS if lang == "ru" else EN_STOPWORDS
+    return [token for token in tokens if token not in stopwords]
+
+
+def clean_text(text: str) -> str:
+    normalized = normalize_text(text)
+    if not normalized:
+        return ""
+
+    lang = detect_language(normalized)
+    tokens = tokenize(normalized)
+
+    if lang == "ru":
+        tokens = lemmatize_ru(tokens)
+
+    tokens = remove_stopwords(tokens, lang)
+    return " ".join(tokens)
 
 
 class TextCleaner:
-    @staticmethod
-    def clean(text: str) -> str:
-        return RussianTextPreprocessor(keep_stopwords=False).preprocess_text(text)
+    def clean(self, text: str) -> str:
+        return clean_text(text)
 
-    @staticmethod
-    def hash_content(title: str, text: str) -> str:
-        payload = f"{title.strip()}||{text.strip()}".encode("utf-8", errors="ignore")
-        return hashlib.sha256(payload).hexdigest()
+    def normalize(self, text: str) -> str:
+        return normalize_text(text)
+
+    def tokenize(self, text: str) -> list[str]:
+        return tokenize(text)
+
+    def hash_content(self, text: str) -> str:
+        cleaned = self.clean(text)
+        return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
+class RussianTextPreprocessor:
+    def clean(self, text: str) -> str:
+        return clean_text(text)

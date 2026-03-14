@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import email.utils
-from dataclasses import dataclass
 from datetime import datetime
 
 import feedparser
@@ -9,57 +8,68 @@ import requests
 from bs4 import BeautifulSoup
 
 
-@dataclass
-class ParsedArticle:
-    title: str
-    url: str
-    published_at: datetime | None
-    text_raw: str
-    author: str | None
+def parse_date(date_str: str | None) -> datetime | None:
+    if not date_str:
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(date_str)
+    except Exception:
+        return None
+
+
+def extract_text_from_url(url: str) -> str:
+    try:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # убираем мусорные теги
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+
+        paragraphs = soup.find_all("p")
+        text = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
+        return text.strip()
+    except Exception:
+        return ""
+
+
+def parse_rss_feed(feed_url: str) -> list[dict]:
+    feed = feedparser.parse(feed_url)
+    items: list[dict] = []
+
+    for entry in feed.entries:
+        url = entry.get("link", "") or ""
+        title = entry.get("title", "Untitled") or "Untitled"
+        published_at = parse_date(entry.get("published"))
+        author = entry.get("author")
+
+        text_raw = ""
+        if url:
+            text_raw = extract_text_from_url(url)
+
+        if not text_raw:
+            summary = entry.get("summary", "") or ""
+            text_raw = BeautifulSoup(summary, "html.parser").get_text(" ", strip=True)
+
+        items.append(
+            {
+                "title": title,
+                "url": url,
+                "published_at": published_at,
+                "text_raw": text_raw,
+                "author": author,
+            }
+        )
+
+    return items
 
 
 class RSSParser:
-    def __init__(self, timeout: int = 15):
-        self.timeout = timeout
-        self.headers = {"User-Agent": "TrendAnalysisSystem/1.0"}
-
-    def parse_date(self, value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return email.utils.parsedate_to_datetime(value)
-        except Exception:
-            return None
-
-    def extract_text_from_url(self, url: str) -> str:
-        try:
-            response = requests.get(url, timeout=self.timeout, headers=self.headers)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            paragraphs = soup.find_all("p")
-            text = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
-            return text.strip()
-        except Exception:
-            return ""
-
-    def parse(self, feed_url: str) -> list[ParsedArticle]:
-        feed = feedparser.parse(feed_url)
-        parsed: list[ParsedArticle] = []
-        for entry in feed.entries:
-            url = entry.get("link", "")
-            title = entry.get("title", "Untitled")
-            published_at = self.parse_date(entry.get("published"))
-            text_raw = self.extract_text_from_url(url) if url else ""
-            if not text_raw:
-                summary = entry.get("summary", "")
-                text_raw = BeautifulSoup(summary, "html.parser").get_text(" ", strip=True)
-            parsed.append(
-                ParsedArticle(
-                    title=title,
-                    url=url,
-                    published_at=published_at,
-                    text_raw=text_raw,
-                    author=entry.get("author"),
-                )
-            )
-        return parsed
+    def parse_feed(self, feed_url: str) -> list[dict]:
+        return parse_rss_feed(feed_url)

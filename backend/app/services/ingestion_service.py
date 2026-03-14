@@ -1,49 +1,104 @@
 from sqlalchemy.orm import Session
 
-from app.parsers.rss_parser import RSSParser
+from app.models.source import Source
+from app.models.document import Document
+from app.parsers.rss_parser import parse_rss_feed
 from app.preprocessing.cleaner import TextCleaner
-from app.repositories.document_repository import DocumentRepository
-from app.repositories.source_repository import SourceRepository
 
 
 class IngestionService:
-    def __init__(self, db: Session):
-        self.db = db
-        self.source_repo = SourceRepository(db)
-        self.document_repo = DocumentRepository(db)
-        self.parser = RSSParser()
+    def __init__(self):
         self.cleaner = TextCleaner()
 
-    def ingest_rss(self, feed_url: str) -> dict:
-        source = self.source_repo.get_or_create(name=feed_url, source_type="rss", url=feed_url)
-        parsed_items = self.parser.parse(feed_url)
+    def ingest_rss_feed(self, db: Session, feed_url: str) -> dict:
+        source = db.query(Source).filter(Source.url == feed_url).first()
 
+        if not source:
+            source = Source(name=feed_url, type="rss", url=feed_url)
+            db.add(source)
+            db.commit()
+            db.refresh(source)
+
+        items = parse_rss_feed(feed_url)
         inserted = 0
-        skipped_duplicates = 0
+        skipped = 0
 
-        for item in parsed_items:
-            if not item.text_raw.strip():
-                continue
+        existing_docs = db.query(Document).all()
 
-            content_hash = self.cleaner.hash_content(item.title, item.text_raw)
-            if self.document_repo.exists_by_url_or_hash(url=item.url or None, content_hash=content_hash):
-                skipped_duplicates += 1
-                continue
+        existing_urls = {doc.url for doc in existing_docs if doc.url}
 
-            self.document_repo.create(
-                source_id=source.id,
-                title=item.title,
-                text_raw=item.text_raw,
-                content_hash=content_hash,
-                url=item.url or None,
-                author=item.author,
-                published_at=item.published_at,
+        existing_title_dates = {
+            (
+                (doc.title or "").strip().lower(),
+                doc.published_at.isoformat() if doc.published_at else None,
             )
+            for doc in existing_docs
+        }
+
+        existing_hashes = set()
+        for doc in existing_docs:
+            if getattr(doc, "content_hash", None):
+                existing_hashes.add(doc.content_hash)
+            elif (doc.text_raw or "").strip():
+                existing_hashes.add(self.cleaner.hash_content(doc.text_raw))
+
+        for item in items:
+            text_raw = (item.get("text_raw") or "").strip()
+            title = (item.get("title") or "").strip()
+            url = (item.get("url") or "").strip()
+            published_at = item.get("published_at")
+            author = item.get("author")
+
+            if not text_raw or not title:
+                skipped += 1
+                continue
+
+            if url and url in existing_urls:
+                skipped += 1
+                continue
+
+            title_date_key = (
+                title.lower(),
+                published_at.isoformat() if published_at else None,
+            )
+            if title_date_key in existing_title_dates:
+                skipped += 1
+                continue
+
+            text_clean = self.cleaner.clean(text_raw)
+            content_hash = self.cleaner.hash_content(text_raw)
+
+            if content_hash in existing_hashes:
+                skipped += 1
+                continue
+
+            doc = Document(
+                source_id=source.id,
+                title=title,
+                text_raw=text_raw,
+                text_clean=text_clean,
+                content_hash=content_hash,
+                url=url or None,
+                author=author,
+                published_at=published_at,
+            )
+            db.add(doc)
+
+            if url:
+                existing_urls.add(url)
+            existing_title_dates.add(title_date_key)
+            existing_hashes.add(content_hash)
+
             inserted += 1
 
-        self.db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
         return {
-            "source_id": source.id,
             "inserted": inserted,
-            "skipped_duplicates": skipped_duplicates,
+            "skipped": skipped,
+            "source_id": source.id,
         }

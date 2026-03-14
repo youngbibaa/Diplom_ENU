@@ -1,18 +1,23 @@
-from app.schemas.common import ORMModel
+from pydantic import BaseModel
 
 
-class AnalyticsRunResponse(ORMModel):
+class IngestRequest(BaseModel):
+    feed_url: str
+
+
+class AnalyticsRunResponse(BaseModel):
     processed: int
     topics_created: int
-    trend_rows_created: int
 
 
-class SentimentSummaryItem(ORMModel):
+class SentimentSummaryItem(BaseModel):
     label: str
     count: int
+    share: float
+    avg_score: float
 
 
-class TopicSummaryItem(ORMModel):
+class TopicSummaryItem(BaseModel):
     topic_id: int
     name: str
     keywords: str
