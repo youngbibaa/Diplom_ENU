@@ -5,7 +5,7 @@ from app.api.deps import get_db
 from app.schemas.analytics import IngestRequest
 from app.services.ingestion_service import IngestionService
 
-router = APIRouter()
+router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
 service = IngestionService()
 
 

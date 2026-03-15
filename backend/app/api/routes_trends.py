@@ -23,7 +23,7 @@ def _serialize(rows):
     ]
 
 
-@router.get("/")
+@router.get("")
 def list_trends(db: Session = Depends(get_db)):
     rows = (
         db.query(TrendMetric, Topic)

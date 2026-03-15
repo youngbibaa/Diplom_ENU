@@ -5,31 +5,48 @@ from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 
 
 CUSTOM_NEWS_STOPWORDS = {
-    "said", "says", "say", "latest", "despite", "investigation", "ties",
-    "region", "official", "officials", "people", "person", "country", "countries",
+    "said", "says", "say",
+    "latest", "despite", "investigation", "ties", "region",
+    "official", "officials", "people", "person", "country", "countries",
     "state", "states", "president", "minister", "ministers", "government",
     "week", "weeks", "month", "months", "year", "years", "day", "days",
     "today", "yesterday", "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday", "new", "must", "may", "might",
-    "one", "two", "three", "our", "their", "his", "her", "she", "they",
-    "mr", "mrs", "ms", "according", "reported", "report",
-    "news", "times", "york", "middle", "east"
+    "friday", "saturday", "sunday",
+    "new", "must", "may", "might", "would", "could",
+    "one", "two", "three",
+    "our", "their", "his", "her", "she", "he", "they",
+    "mr", "mrs", "ms",
+    "according", "reported", "report",
+    "news", "times", "york",
+    "middle", "east", "middle east",
+    "showed", "show", "shows",
+    "earlier", "later",
+    "prime", "video", "political", "economic",
+    "including", "around", "across", "back", "still",
+    "among", "without", "within",
+    "agency", "office", "statement", "officially",
+    "called", "calling", "told", "saying",
+    "first", "second", "third",
+    "least", "almost", "another", "several",
 }
 
 DEFAULT_STOPWORDS = ENGLISH_STOP_WORDS.union(CUSTOM_NEWS_STOPWORDS)
 
-WEAK_TOPIC_WORDS = DEFAULT_STOPWORDS.union({
-    "attack", "attacks", "war", "conflict", "crisis", "situation"
+WEAK_TOPIC_NAME_WORDS = DEFAULT_STOPWORDS.union({
+    "war", "attack", "attacks", "conflict", "crisis", "situation",
+    "strikes", "military", "officials", "reported", "showed"
 })
+
+IMPORTANT_SHORT_TOKENS = {"iran", "iraq", "oil", "gaza", "isis"}
 
 
 def _is_good_topic_name_token(token: str) -> bool:
     token = token.strip().lower()
     if not token:
         return False
-    if token in WEAK_TOPIC_WORDS and token not in {"iran", "israel", "china", "oil"}:
+    if token in WEAK_TOPIC_NAME_WORDS and token not in IMPORTANT_SHORT_TOKENS:
         return False
-    if len(token) < 4 and token not in {"iran", "iraq", "oil"}:
+    if len(token) < 4 and token not in IMPORTANT_SHORT_TOKENS:
         return False
     return True
 
@@ -71,7 +88,7 @@ def build_topics(texts: list[str], n_topics: int = 5, n_top_words: int = 7):
 
     vectorizer = CountVectorizer(
         stop_words=list(DEFAULT_STOPWORDS),
-        max_df=0.85,
+        max_df=0.82,
         min_df=min_df,
         ngram_range=(1, 2),
         token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z\-]{2,}\b",

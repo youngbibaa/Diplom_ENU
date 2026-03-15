@@ -6,6 +6,7 @@ from app.api.routes_documents import router as documents_router
 from app.api.routes_health import router as health_router
 from app.api.routes_ingestion import router as ingestion_router
 from app.api.routes_trends import router as trends_router
+from app.api.routes_dashboard import router as dashboard_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 
@@ -25,6 +26,7 @@ app.include_router(documents_router)
 app.include_router(ingestion_router)
 app.include_router(analytics_router)
 app.include_router(trends_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")

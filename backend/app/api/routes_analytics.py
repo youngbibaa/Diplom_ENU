@@ -9,17 +9,16 @@ from app.models.document_topic import DocumentTopic
 from app.services.analytics_service import run_analytics
 from app.services.trend_service import rebuild_trends
 
-router = APIRouter()
+router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
-
-@router.post("/analytics/run")
+@router.post("/run")
 def analytics_run(db: Session = Depends(get_db)):
     result = run_analytics(db)
     trend_result = rebuild_trends(db)
     return {**result, **trend_result}
 
 
-@router.get("/analytics/sentiment-summary")
+@router.get("/sentiment-summary")
 def sentiment_summary(db: Session = Depends(get_db)):
     rows = (
         db.query(
@@ -56,7 +55,7 @@ def sentiment_summary(db: Session = Depends(get_db)):
     }
 
 
-@router.get("/analytics/topics")
+@router.get("/topics")
 def get_topics(db: Session = Depends(get_db)):
     rows = (
         db.query(
