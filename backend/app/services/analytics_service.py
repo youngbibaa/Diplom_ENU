@@ -1,5 +1,6 @@
 import logging
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.models.document import Document
@@ -16,27 +17,19 @@ logger = logging.getLogger(__name__)
 #  Параметры фильтрации корпуса
 # ─────────────────────────────────────────────
 
-# Минимальное число токенов после очистки для участия в topic modeling.
-# 8 (старое значение) — слишком мало, это одно-два предложения.
-# 20 — разумный минимум для LDA: достаточно сигнала, мало шума.
+# Только статьи не старше этого количества дней участвуют в topic modeling.
+# Исключает архивные статьи BBC/NYT (2023–2024), которые попадают в RSS
+# и искажают trend_score и growth_rate.
+TOPIC_MAX_AGE_DAYS = 30
+
 TOPIC_MIN_TOKEN_COUNT = 20
-
-# Минимальная доля кириллических символов для русскоязычных документов.
-# Фильтрует смешанный мусор (коды, URL, транслит).
-RU_CHAR_RATIO_THRESHOLD = 0.4
-
-# Минимальное число уникальных слов в документе.
-# Короткий повтор одного слова — не тема.
 TOPIC_MIN_UNIQUE_WORDS = 8
+TOPIC_ASSIGNMENT_MIN_PROBABILITY = 0.45
 
-# Порог уверенности при назначении темы документу.
-# LDA даёт распределение по темам; берём только высоковероятные назначения.
-TOPIC_ASSIGNMENT_MIN_PROBABILITY = 0.45  # снижено с 0.65 — меньше "неназначенных"
-
-# Адаптивное число тем:
-# маленький корпус → меньше тем, большой → больше.
 TOPIC_COUNT_THRESHOLDS = [
-    (200, 7),
+    (600, 9),
+    (300, 8),
+    (150, 7),
     (80,  6),
     (30,  5),
     (10,  4),
@@ -44,32 +37,19 @@ TOPIC_COUNT_THRESHOLDS = [
 ]
 
 BLOCKED_URL_PATTERNS = (
-    "/video/",
-    "/briefing/",
-    "/arts/",
-    "/music/",
-    "/opinion/",
-    "/interactive/",
-    "/live/",
+    "/video/", "/briefing/", "/arts/",
+    "/music/", "/opinion/", "/interactive/", "/live/",
 )
 
 NOISY_TEXT_PATTERNS = (
-    "video loaded",
-    "advertisement",
-    "sign up",
-    "newsletter",
-    "supported by",
-    "listen to this article",
-    "watch:",
-    "opinion video",
-    "visual investigations",
+    "video loaded", "advertisement", "sign up", "newsletter",
+    "supported by", "listen to this article", "watch:",
+    "opinion video", "visual investigations",
 )
 
 NOISY_TITLE_PATTERNS = (
-    "what's good",
-    "what\u2019s good",
-    "morning briefing",
-    "evening briefing",
+    "what's good", "what\u2019s good",
+    "morning briefing", "evening briefing",
 )
 
 
@@ -89,22 +69,10 @@ def _unique_word_count(text: str | None) -> int:
     return len(set(t.lower() for t in text.split() if t.strip()))
 
 
-def _cyrillic_ratio(text: str | None) -> float:
-    """Доля кириллических символов в тексте (без пробелов)."""
-    if not text:
-        return 0.0
-    chars = [c for c in text if c.strip()]
-    if not chars:
-        return 0.0
-    cyrillic = sum(1 for c in chars if "\u0400" <= c <= "\u04ff")
-    return cyrillic / len(chars)
-
-
 def _contains_noise(text: str | None, patterns: tuple[str, ...]) -> bool:
     if not text:
         return False
-    lowered = text.lower()
-    return any(p in lowered for p in patterns)
+    return any(p in text.lower() for p in patterns)
 
 
 def _get_adaptive_n_topics(n_docs: int) -> int:
@@ -114,13 +82,20 @@ def _get_adaptive_n_topics(n_docs: int) -> int:
     return 3
 
 
-def _is_document_eligible_for_topics(doc: Document) -> tuple[bool, str | None]:
-    """
-    Определяет, подходит ли документ для участия в topic modeling.
+def _is_recent(doc: Document, cutoff: datetime) -> bool:
+    """Проверяет, что документ опубликован не раньше cutoff."""
+    pub = doc.published_at or doc.collected_at
+    if not pub:
+        return False
+    if pub.tzinfo is None:
+        pub = pub.replace(tzinfo=timezone.utc)
+    return pub >= cutoff
 
-    Возвращает (True, None) если документ подходит,
-    или (False, reason) с причиной исключения.
-    """
+
+def _is_document_eligible_for_topics(
+    doc: Document,
+    cutoff: datetime,
+) -> tuple[bool, str | None]:
     url = (doc.url or "").lower()
     title = (doc.title or "").strip()
     text_clean = (doc.text_clean or "").strip()
@@ -128,11 +103,12 @@ def _is_document_eligible_for_topics(doc: Document) -> tuple[bool, str | None]:
     if not text_clean:
         return False, "empty_text"
 
-    # Улучшенный порог: 20 токенов вместо 8
+    if not _is_recent(doc, cutoff):
+        return False, "too_old"
+
     if _token_count(text_clean) < TOPIC_MIN_TOKEN_COUNT:
         return False, "too_short"
 
-    # Слишком мало уникальных слов — вероятно мусор или повтор
     if _unique_word_count(text_clean) < TOPIC_MIN_UNIQUE_WORDS:
         return False, "low_unique_words"
 
@@ -165,9 +141,11 @@ def run_analytics(db: Session) -> dict:
 
     logger.info("Analytics: documents loaded = %s", len(documents))
 
-    # ── 1. Предобработка текста + sentiment ──────────────────────────────────
-    processed = 0
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=TOPIC_MAX_AGE_DAYS)
+    logger.info("Analytics: topic modeling cutoff = %s", cutoff.date())
 
+    # ── 1. Предобработка + sentiment (все документы без ограничения по дате) ─
+    processed = 0
     for doc in documents:
         cleaned = clean_text(doc.text_raw or "")
         doc.text_clean = cleaned
@@ -195,28 +173,28 @@ def run_analytics(db: Session) -> dict:
     deleted_topics = db.query(Topic).delete()
     db.commit()
     logger.info(
-        "Analytics: cleared previous topics (document_topics=%s, topics=%s)",
+        "Analytics: cleared previous topics (doc_topics=%s, topics=%s)",
         deleted_doc_topics, deleted_topics,
     )
 
-    # ── 3. Фильтрация корпуса ────────────────────────────────────────────────
+    # ── 3. Фильтрация корпуса (только свежие документы) ─────────────────────
     all_docs = db.query(Document).all()
     eligible_docs: list[Document] = []
     skipped_reasons: Counter = Counter()
 
     for doc in all_docs:
-        eligible, reason = _is_document_eligible_for_topics(doc)
+        eligible, reason = _is_document_eligible_for_topics(doc, cutoff)
         if eligible:
             eligible_docs.append(doc)
         else:
             skipped_reasons[reason] += 1
 
-    logger.info("Analytics: eligible documents for topic modeling = %s", len(eligible_docs))
+    logger.info("Analytics: eligible for topic modeling = %s", len(eligible_docs))
     if skipped_reasons:
-        logger.info("Analytics: excluded documents by reason = %s", dict(skipped_reasons))
+        logger.info("Analytics: skipped by reason = %s", dict(skipped_reasons))
 
     if len(eligible_docs) < 3:
-        logger.info("Analytics: not enough eligible documents for topic modeling")
+        logger.info("Analytics: not enough eligible documents")
         return {
             "processed": processed,
             "topics_created": 0,
@@ -226,16 +204,10 @@ def run_analytics(db: Session) -> dict:
 
     # ── 4. Topic modeling ────────────────────────────────────────────────────
     texts = [doc.text_clean for doc in eligible_docs]
-
-    # Адаптивное число тем в зависимости от размера корпуса
     n_topics = _get_adaptive_n_topics(len(eligible_docs))
-    logger.info("Analytics: using n_topics=%s for %s eligible docs", n_topics, len(eligible_docs))
+    logger.info("Analytics: n_topics=%s for %s docs", n_topics, len(eligible_docs))
 
-    topics_data, assignments = build_topics(
-        texts=texts,
-        n_topics=n_topics,
-        n_top_words=7,
-    )
+    topics_data, assignments = build_topics(texts=texts, n_topics=n_topics, n_top_words=7)
 
     if not topics_data:
         logger.info("Analytics: no topics built")
@@ -246,44 +218,41 @@ def run_analytics(db: Session) -> dict:
             "assigned_to_topics": 0,
         }
 
-    # ── 5. Сохранение тем в БД ───────────────────────────────────────────────
+    # ── 5. Сохранение тем ────────────────────────────────────────────────────
     topic_objects: list[Topic] = []
-    for topic_data in topics_data:
-        topic = Topic(name=topic_data["name"], keywords=topic_data["keywords"])
-        db.add(topic)
-        topic_objects.append(topic)
+    for td in topics_data:
+        t = Topic(name=td["name"], keywords=td["keywords"])
+        db.add(t)
+        topic_objects.append(t)
 
     db.commit()
-    for topic in topic_objects:
-        db.refresh(topic)
+    for t in topic_objects:
+        db.refresh(t)
 
-    logger.info("Analytics: topics built = %s", len(topic_objects))
+    logger.info("Analytics: topics created = %s", len(topic_objects))
 
     # ── 6. Назначение документов темам ───────────────────────────────────────
     assigned_count = 0
-    skipped_low_probability = 0
+    skipped_low_prob = 0
 
     for doc, (topic_index, probability) in zip(eligible_docs, assignments):
         if topic_index >= len(topic_objects):
             continue
-
         if probability < TOPIC_ASSIGNMENT_MIN_PROBABILITY:
-            skipped_low_probability += 1
+            skipped_low_prob += 1
             continue
 
-        db.add(
-            DocumentTopic(
-                document_id=doc.id,
-                topic_id=topic_objects[topic_index].id,
-                probability=round(probability, 4),
-            )
-        )
+        db.add(DocumentTopic(
+            document_id=doc.id,
+            topic_id=topic_objects[topic_index].id,
+            probability=round(probability, 4),
+        ))
         assigned_count += 1
 
     db.commit()
 
-    logger.info("Analytics: topic assignments created = %s", assigned_count)
-    logger.info("Analytics: low-probability assignments skipped = %s", skipped_low_probability)
+    logger.info("Analytics: assignments created = %s", assigned_count)
+    logger.info("Analytics: skipped low-prob = %s", skipped_low_prob)
     logger.info("Analytics: finished")
 
     return {
@@ -291,6 +260,6 @@ def run_analytics(db: Session) -> dict:
         "topics_created": len(topic_objects),
         "eligible_for_topics": len(eligible_docs),
         "assigned_to_topics": assigned_count,
-        "skipped_low_prob": skipped_low_probability,
+        "skipped_low_prob": skipped_low_prob,
         "skipped_reasons": dict(skipped_reasons),
     }
